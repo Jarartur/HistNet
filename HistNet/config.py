@@ -3,12 +3,13 @@
 # from albumentations.pytorch import ToTensorV2
 import cv2
 import numpy as np
+from numpy.lib.utils import who
 from utils import Align_subject, resizeAndPad, resize_dataset
 from torchvision import transforms
 import torchio as tio
 import os
 
-run_identifier = 'longer_epochs-w_avg'
+run_identifier = 'whole'
 # run_identifier = 'hparams-testing'
 resize = 6
 # %% General config
@@ -18,7 +19,7 @@ config = {'epochs': 150,
           # 'test_every': 100,
         #   'lr_scheduler_every': 250,
           # 'lmbd_grad_reg': 1000,
-          'checkpoint_every': 25,
+          'checkpoint_every': 10,
           }
 
 # %% Data config
@@ -26,28 +27,28 @@ config = {'epochs': 150,
 data_config = {'train_root': f'resized_{resize}/',
                'test_root': f'resized_{resize}/',
                'main_file_path': 'raw/edited_data_v3.csv',
-               'summary_path': f'runs/registration_v2/{run_identifier}',
+               'summary_path': f'runs/hunt/{run_identifier}',
         #        'sample_dir': 'sample',
               #  'batch_size': 64,
                'resample_rate': resize,
-               'model_checkpoint': 'checkpoints/registration_v2/RegistrationNetwork-mv_test_avg-cost_ncc_local-vecint_None-reg_diffusion-lr_0.001-decay_0.995-bsize_8-lmd_reg_4000-lmd_trans_None.tar'}
+               'model_checkpoint': 'checkpoints/hunt/hunt-cost_ncc_local-vecint_None-reg_diffusion-lr_0.01-decay_0.97-bsize_8-lmd_reg_8000-lmd_trans_None_3.tar'}
 
 base_transforms = [
         # Align_subject(data_config['resample_rate']),
-        Align_subject(1),
+        Align_subject(1, color_mode='bgr', whole_mode_size=(800, 800)),
         tio.RescaleIntensity(out_min_max=(0, 1)),
         ]
 # %% Model config
 model_config = {#'learning_rate': 1e-4,
                 # 'decay_rate': 0.995,
                 'betas': [0.9, 0.999],
-                'resume': True,
+                'resume': False,
                 'reset_optim': True,
                 'reset_epoch': True,
-                'checkpoint_path': f'checkpoints/registration_v2/{run_identifier}',
+                'checkpoint_path': f'checkpoints/hunt/{run_identifier}',
                 }
 
-lr_config = {'decay_kickin': 0,
+lr_config = {'decay_kickin': 10,
              'swa_kickin': 130}
 
 def init_data(root='raw/', resize=4, summary_path='raw/edited_data_v3.csv', save_root=''):

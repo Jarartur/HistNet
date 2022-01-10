@@ -40,11 +40,11 @@ init_data(root='raw/', resize=data_config['resample_rate'], summary_path=data_co
 rTRE_list = []
 
 # %% Hyperparameters definitions
-lambda_reg_list = [2000]
-learning_rate_list = [1e-4]
+lambda_reg_list = [6000]
+learning_rate_list = [1e-2]
 decay_list = [0.995]
 batch_size_list = [8]
-reg_functions = [curvature_regularization]
+reg_functions = [diffusion]
 cost_functions = [ncc_local]
 vecint_list = [None]
 lambda_trans_list = [None]
@@ -70,15 +70,15 @@ for lambda_trans in lambda_trans_list:
                                 AnhirSet = AnhirPatches(data_config['main_file_path'], data_config['train_root'], base_transforms=base_transforms)
                                 dataset = AnhirSet.get_training_subjects()
                                 # torchio queue for patch-based pipeline
-                                queue = AnhirSet.get_queue(patch_size=(256, 256, 1),
-                                                           max_length=batch_size*8*2,
-                                                           samples_per_volume=batch_size*8,
-                                                           num_workers=4,
-                                                           shuffle_subjects=True,
-                                                           shuffle_patches=False,
-                                                           start_background=True,)
-                                training_loader_patches = torch.utils.data.DataLoader(queue, batch_size=batch_size)
-                                params = {'patch_size':(256, 256, 1), 'patch_overlap':(20, 20, 0)} # parameters on test-time inference
+                                # queue = AnhirSet.get_queue(patch_size=(256, 256, 1),
+                                #                            max_length=batch_size*8*2,
+                                #                            samples_per_volume=batch_size*8,
+                                #                            num_workers=4,
+                                #                            shuffle_subjects=True,
+                                #                            shuffle_patches=False,
+                                #                            start_background=True,)
+                                training_loader_patches = torch.utils.data.DataLoader(dataset, batch_size=batch_size, num_workers=4, shuffle=True)
+                                # params = {'patch_size':(256, 256, 1), 'patch_overlap':(20, 20, 0)} # parameters on test-time inference
                                 # %% Model init
                                 # transfer = UNet(6, 6).to(device).apply(he_init)
                                 if lambda_trans is not None: transfer = RegistrationNetwork(input_channels=3, ouput_channels=6).apply(he_init).to(device)
@@ -114,7 +114,6 @@ for lambda_trans in lambda_trans_list:
                                 # SWA
                                 nonrigid_swa = AveragedModel(nonrigid)
                                 
-
                                 # Logging
                                 writer = SummaryWriter(data_config['summary_path']+exp_path)
 
@@ -231,19 +230,19 @@ for lambda_trans in lambda_trans_list:
                                 # if epoch % config['test_every'] == 0 and epoch != 0:
 
                                 # calculating whole images from patches and rTRE estimations
-                                grid, rTRE = evaluate(AnhirSet, nonrigid_swa, transfer, data_config['main_file_path'], device, data_config['train_root'], data_config['resample_rate'], **params) #NOTE: *4 for reduced dataset
-                                rTRE_list += [rTRE]
-                                # print(f'{rTRE=}')
-                                writer.add_scalar("rTRE metric", rTRE, global_step=epoch)
-                                writer.add_image("Registration (& transfer) test", grid.float(), global_step=epoch)
-                                writer.add_hparams({'lr': learning_rate,
-                                                    'decay': decay,
-                                                    'batch_size': batch_size,
-                                                    'resample_rate': data_config['resample_rate'],
-                                                    'lambda_reg': lambda_reg},
-                                                    {'hparam/loss_ncc': np.mean(batch_loss_ncc),
-                                                    'hparam/rTRE': rTRE,
-                                                    'hparam/jacobians': jacobians})
+                                # grid, rTRE = evaluate(AnhirSet, nonrigid_swa, transfer, data_config['main_file_path'], device, data_config['train_root'], data_config['resample_rate'], **params) #NOTE: *4 for reduced dataset
+                                # rTRE_list += [rTRE]
+                                # # print(f'{rTRE=}')
+                                # writer.add_scalar("rTRE metric", rTRE, global_step=epoch)
+                                # writer.add_image("Registration (& transfer) test", grid.float(), global_step=epoch)
+                                # writer.add_hparams({'lr': learning_rate,
+                                #                     'decay': decay,
+                                #                     'batch_size': batch_size,
+                                #                     'resample_rate': data_config['resample_rate'],
+                                #                     'lambda_reg': lambda_reg},
+                                #                     {'hparam/loss_ncc': np.mean(batch_loss_ncc),
+                                #                     'hparam/rTRE': rTRE,
+                                #                     'hparam/jacobians': jacobians})
                                 writer.flush()
 
                                 torch.save({

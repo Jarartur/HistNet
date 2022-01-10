@@ -36,12 +36,14 @@ class AnhirPatches():
                        root:str=r'data/raw/', 
                        base_transforms=None,
                        train_transforms=None,
+                       color_mode='bgr',
                        ) -> None:
 
         self.base_transforms = base_transforms
         self.train_transforms = train_transforms
         self.summary_path = summary_path
         self.root = root
+        self.color_mode = color_mode
         
     def get_training_subjects(self) -> tio.SubjectsDataset:
         '''
@@ -53,7 +55,7 @@ class AnhirPatches():
         # get python lists of files
         src_img_paths, trg_img_paths, shapes, trans_mats = self._parse_summary(True)
         # create torchio Subjects (dictionaries with optional metadata)
-        subjects = self.get_subjects(src_img_paths, trg_img_paths, shapes, trans_mats, self.custom_reader)
+        subjects = self.get_subjects(src_img_paths, trg_img_paths, shapes, trans_mats, lambda path: self.custom_reader(path, self.color_mode))
 
         # merge transforms if needed
         transforms = self.base_transforms
@@ -75,7 +77,7 @@ class AnhirPatches():
         elif mode == 'test_eval':
             src_img_paths, trg_img_paths, shapes, trans_mats = self._parse_summary(False)
         # create torchio Subjects (dictionaries with optional metadata)
-        subjects = self.get_subjects(src_img_paths, trg_img_paths, shapes, trans_mats, self.custom_reader)
+        subjects = self.get_subjects(src_img_paths, trg_img_paths, shapes, trans_mats, lambda path: self.custom_reader(path, self.color_mode))
 
         transforms = tio.Compose(self.base_transforms)
         return tio.SubjectsDataset(subjects, transform=transforms)
@@ -216,13 +218,22 @@ class AnhirPatches():
         return subjects
 
     @staticmethod
-    def custom_reader(path):
+    def custom_reader(path, mode: str ='bgr'):
         '''
         Reader for lazy loading in torchio Subjects.
         Default one messes up the orientation.
         '''
         path = str(path)
-        image = cv2.imread(path)
+        BGRimage = cv2.imread(path)
+        if mode == 'bgr':
+            image = BGRimage
+        elif mode == 'rgb':
+            image = cv2.cvtColor(BGRimage, cv2.COLOR_BGR2RGB)
+        elif mode =='cielab':
+            image = cv2.cvtColor(BGRimage, cv2.COLOR_BGR2LAB)
+        else:
+            raise NotImplementedError('Avilable color modes are: bgr, rgb, cielab')
+
         affine = np.eye(4)
         return image, affine
 

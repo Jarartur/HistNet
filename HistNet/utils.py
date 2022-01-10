@@ -102,14 +102,16 @@ def get_gaussian_kernel(device='cpu', kernel_size=3, sigma=2, channels=3):
     gaussian_filter.weight.requires_grad = False
     return gaussian_filter
 
-def load_checkpoint(checkpoint_path, model_registration, model_transfer, optimizer, scheduler, model_config, scheduler_swa=None):
+def load_checkpoint(checkpoint_path, model_registration, model_transfer, optimizer, scheduler, model_config):
     '''
     General checkpoint loading
     '''
     checkpoint = torch.load(checkpoint_path)
-    model_registration.load_state_dict(checkpoint['nonrigid_model_state_dict'])
-    model_registration.train()
-    print('loaded registration model weights')
+
+    if model_registration is not None:
+        model_registration.load_state_dict(checkpoint['nonrigid_model_state_dict'])
+        model_registration.train()
+        print('loaded registration model weights')
     if model_transfer is not None:
         model_transfer.load_state_dict(checkpoint['tranfer_model_state_dict'])
         model_transfer.train()
@@ -119,8 +121,6 @@ def load_checkpoint(checkpoint_path, model_registration, model_transfer, optimiz
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         print('restored optims')
     else: print('reset/default optims')
-    # if scheduler_swa is not None: scheduler_swa
-    # if scaler is not None: scaler.load_state_dict(checkpoint['scaler_state_dict'])
     if model_config['reset_epoch']:
         epoch = 0
         print('starting epoch=0')
@@ -167,7 +167,7 @@ def warp_checks(n_grid, shape, device, **params):
     # grid = vutils.make_grid(warped_checks, warped_checks.shape[0])
     return warped_checks
 
-def make_checks(shape, device, num_stripes=8, width=4):
+def make_checks(shape, device, num_stripes=16, width=2):
     '''
     Creates grid for warping with displacement fields
     '''
@@ -250,16 +250,21 @@ class Align_subject():
     Aligns src and trg images by affine matrix from summary_file.
     It is apllied before the images are patchified.
     '''
-    def __init__(self, resample_rate=15) -> None:
+    def __init__(self, resample_rate=15, color_mode='bgr', whole_mode_size=None) -> None:
         self.resample_rate = resample_rate
+        self.colorspace = color_mode
+        self.whole_mode = whole_mode_size
     
     def __call__(self, data):
-        return self.align_subject(data, self.resample_rate)
+        return self.align_subject(data, self.resample_rate, self.colorspace, whole_mode_size=self.whole_mode)
 
     @staticmethod
-    def align_subject(subject, resample_rate=15):
+    def align_subject(subject, resample_rate=15, color_mode='bgr', whole_mode_size=None):
         '''1st Transform for tio.Compose'''
-        padColor=255 # hard-coded padding color
+        if color_mode == 'bgr' or color_mode == 'rgb':
+            padColor=255
+        elif color_mode == 'cielab':
+            padColor=[255,128,128] # hard-coded padding color
         # getting data from torchio subject (which we get from iterating over SubjectDataset)
         src_img = subject['src'][tio.DATA].squeeze(3).permute(1, 2, 0).numpy()
         trg_img = subject['trg'][tio.DATA].squeeze(3).permute(1, 2, 0).numpy()
@@ -276,8 +281,9 @@ class Align_subject():
         assert tuple(shape) == src_img.shape == trg_img.shape
 
         # additional resizing
-        src_img = resample(src_img, resample_rate)
-        trg_img = resample(trg_img, resample_rate)
+        if resample_rate != 1:
+            src_img = resample(src_img, resample_rate)
+            trg_img = resample(trg_img, resample_rate)
         assert src_img.shape == trg_img.shape
         shape = src_img.shape
 
@@ -288,6 +294,10 @@ class Align_subject():
                                 (src_img.shape[1], src_img.shape[0]), 
                                 borderMode=cv2.BORDER_CONSTANT, 
                                 borderValue=padColor)
+
+        if whole_mode_size is not None:
+            warp_img = resizeAndPad(warp_img, whole_mode_size, padColor) #TOCHANGE not ideal way
+            trg_img = resizeAndPad(trg_img, whole_mode_size, padColor)
 
         # dummy singleton dimension (torchio works on 3D images by default)
         src_img = warp_img.transpose(2, 0, 1)[..., np.newaxis]
@@ -360,7 +370,7 @@ def resample(img, factor: Union[int, float]=2, padColor=255):
     scaled_img = cv2.resize(img, (sw, sh), interpolation=interp)
     return scaled_img
 
-def resizeAndPad(img, size=(256, 256), padColor:int=255, **kwargs):
+def resizeAndPad(img, size=(256, 256), padColor=255, **kwargs):
     '''
     - Currently not in use -
 

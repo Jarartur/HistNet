@@ -1,11 +1,14 @@
 # %% Imports
 # PyTorch
+from numpy.lib.utils import source
 import torch
 from torch.utils.data import DataLoader
 import torch.optim as optim
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 import torchvision
+import torchvision.utils as vutils
+from kornia.color import lab_to_rgb
 # fancy stuff
 import torch.cuda.amp as amp
 from torch.optim.swa_utils import AveragedModel, SWALR
@@ -40,14 +43,14 @@ init_data(root='raw/', resize=data_config['resample_rate'], summary_path=data_co
 rTRE_list = []
 
 # %% Hyperparameters definitions
-lambda_reg_list = [2000]
-learning_rate_list = [1e-4]
+lambda_reg_list = [1]
+learning_rate_list = [1e-3]
 decay_list = [0.995]
 batch_size_list = [8]
-reg_functions = [curvature_regularization]
-cost_functions = [ncc_local]
+reg_functions = [diffusion]
+cost_functions = [mind_loss]
 vecint_list = [None]
-lambda_trans_list = [None]
+lambda_trans_list = [8000]
 
 for lambda_trans in lambda_trans_list:
     for cost in cost_functions:
@@ -67,7 +70,7 @@ for lambda_trans in lambda_trans_list:
                                 print("Using lr config:")
                                 print(lr_config)
                                 # Dataset initialization
-                                AnhirSet = AnhirPatches(data_config['main_file_path'], data_config['train_root'], base_transforms=base_transforms)
+                                AnhirSet = AnhirPatches(data_config['main_file_path'], data_config['train_root'], base_transforms=base_transforms, color_mode='cielab')
                                 dataset = AnhirSet.get_training_subjects()
                                 # torchio queue for patch-based pipeline
                                 queue = AnhirSet.get_queue(patch_size=(256, 256, 1),
@@ -79,24 +82,13 @@ for lambda_trans in lambda_trans_list:
                                                            start_background=True,)
                                 training_loader_patches = torch.utils.data.DataLoader(queue, batch_size=batch_size)
                                 params = {'patch_size':(256, 256, 1), 'patch_overlap':(20, 20, 0)} # parameters on test-time inference
+                                
                                 # %% Model init
-                                # transfer = UNet(6, 6).to(device).apply(he_init)
-                                if lambda_trans is not None: transfer = RegistrationNetwork(input_channels=3, ouput_channels=6).apply(he_init).to(device)
-                                else: transfer = None
-                                channels = 2
-                                # if int_num is not None:
-                                #     nonrigid = Nonrigid_Registration_Network(channels, vecint=True, num_int=int_num).to(device).apply(he_init)
-                                # else:
-                                #     nonrigid = Nonrigid_Registration_Network(channels, vecint=False, num_int=int_num).to(device).apply(he_init)
-
-                                nonrigid = RegistrationNetwork(input_channels=1, ouput_channels=2).apply(he_init).to(device)
-                                # nonrigid_ema = copy.deepcopy(nonrigid)
-                                # nonrigid = nonrigid.apply(he_init).to(device)
-                                # nonrigid_ema = nonrigid.to(device)
+                                transfer = RegistrationNetwork(input_channels=3, ouput_channels=4).apply(he_init).to(device) # for cielab we use all L*a*b channels but ouput only *a*b
+                                nonrigid = None
 
                                 nets = []
-                                nets += [nonrigid]
-                                if transfer is not None: nets += [transfer]
+                                nets += [transfer]
 
                                 # parameters list for optimizer
                                 parameters = []
@@ -106,13 +98,7 @@ for lambda_trans in lambda_trans_list:
                                 # optimizer, scheduler and tensorboard logger initialization
                                 optimizer = optim.Adam(parameters, learning_rate, betas=model_config['betas'])
                                 scheduler = optim.lr_scheduler.LambdaLR(optimizer, lambda step: decay**step)
-                                # scheduler = None
-                                # epochs_oc = config['epochs']-(config['epochs']-lr_config['swa_kickin'])
-                                # print(epochs_oc)
-                                # scheduler_onecycle = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.01, steps_per_epoch=len(training_loader_patches), epochs=epochs_oc)
-                                # scheduler = scheduler_onecycle
-                                # SWA
-                                nonrigid_swa = AveragedModel(nonrigid)
+                                transfer_swa = AveragedModel(transfer)
                                 
 
                                 # Logging
@@ -131,50 +117,50 @@ for lambda_trans in lambda_trans_list:
                                 # main trainloop
                                 for epoch in trange(epoch_resume, config['epochs']+1, desc='Epochs'):
                                     batch_loss_ncc = []
-                                    batch_loss_grad = []
                                     batch_loss_trans = []
                                     for samples in tqdm(training_loader_patches, desc='Dataloader'):
+
                                         # loading images, transfering to gpu and adding noise
-                                        content_image, style_image = get_images(samples, device, False)
+                                        source_image, style_image = get_images(samples, device, False)
+
                                         # conditional style transfer
                                         if transfer is not None:
-                                            content_cp =  TF.rgb_to_grayscale(content_image.detach().clone())
+                                            intense_tensor = transfer(source_image, style_image)
+                                            ab_image = ((source_image[:, 1:3, :, :] * intense_tensor[:, 0:2, :, :]) + intense_tensor[:, 2:, :, :]) # leave L channel alone
 
-                                            intense_tensor = transfer(content_image, style_image)
-                                            content_image = ((content_image * intense_tensor[:, 0:3, :, :]) + intense_tensor[:, 3:, :, :])
-                                        else:
-                                            content_cp = None
+                                        # cielab to rgb shenanigans
+                                        lab_source = (source_image[:, 0, :, :] * 100).unsqueeze(1)
+                                        ab_image = ((ab_image * 2) - 1) * 127
+                                        output_image = torch.cat([lab_source, ab_image], dim=1)
+                                        output_image = lab_to_rgb(output_image, clip=True)
+
+                                        ab_source = ((source_image[:, 1:3, :, :] * 2) - 1) * 127
+                                        source_image = torch.cat([lab_source, ab_source], dim=1)
+                                        source_image = lab_to_rgb(source_image, clip=True)
+
+                                        lab_style = (style_image[:, 0, :, :] * 100).unsqueeze(1)
+                                        ab_style = ((style_image[:, 1:3, :, :] * 2) - 1) * 127
+                                        style_image = torch.cat([lab_style, ab_style], dim=1)
+                                        style_image = lab_to_rgb(style_image, clip=True)
 
                                         # transfer to grayscale
-                                        content_image = TF.rgb_to_grayscale(content_image)
+                                        output_image = TF.rgb_to_grayscale(output_image)
                                         style_image = TF.rgb_to_grayscale(style_image)
-
-                                        # taking negative of images
-                                        content_image = 1 - content_image
-                                        style_image = 1 - style_image
-
-                                        # non rigid transform
-                                        deformation_field = nonrigid(style_image, content_image)
-                                        n_grid = df_field_v2(content_image, deformation_field, None, device)
-                                        output_image = F.grid_sample(content_image, n_grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+                                        source_image = TF.rgb_to_grayscale(source_image)
 
                                         # loss
                                         loss_ncc = cost(output_image, style_image, device)
-                                        loss_grad = lambda_reg*regularization(deformation_field, device)
                                         if transfer is not None: loss_transfer = lambda_trans*diffusion(intense_tensor, device)
-                                        loss = loss_ncc + loss_grad
+                                        loss = loss_ncc
                                         if transfer is not None: loss = loss + loss_transfer
                                         batch_loss_ncc += [loss_ncc.item()]
-                                        batch_loss_grad += [loss_grad.item()]
                                         if transfer is not None: batch_loss_trans += [loss_transfer.item()]
 
                                         # gradient calculations
                                         loss.backward()
                                         optimizer.step()
                                         optimizer.zero_grad()
-                                        # if epoch < lr_config['swa_kickin']:
-                                        #     scheduler_onecycle.step()
-                                        #     # print('lr adjusted')
+
 
                                     # lr adjustments
                                     if epoch == lr_config['swa_kickin']:
@@ -182,76 +168,46 @@ for lambda_trans in lambda_trans_list:
                                         swa_scheduler = SWALR(optimizer, swa_lr=scheduler.get_last_lr())
                                         print(f'swa scheduler init, {epoch=}')
                                     elif epoch > lr_config['swa_kickin']:
-                                        nonrigid_swa.update_parameters(nonrigid)
+                                        transfer_swa.update_parameters(nonrigid)
                                         swa_scheduler.step()
-                                        # print(f'changed swa, {epoch=}')
                                     elif epoch >= lr_config['decay_kickin']:
                                         scheduler.step()
-                                        # print(f'changed decay, {epoch=}')
-                                    # moving_average(nonrigid, nonrigid_ema, beta=0.999)
 
                                     # tensorboard loging
                                     writer.add_scalar(f"Learning rate", optimizer.param_groups[0]['lr'], global_step=epoch)
                                     writer.add_scalar(f"{loss_type} loss", np.mean(batch_loss_ncc), global_step=epoch)
-                                    writer.add_scalar("Grad loss (scaled)", np.mean(batch_loss_grad), global_step=epoch)
-                                    if transfer is not None: writer.add_scalar(f"Trans loss", np.mean(batch_loss_trans), global_step=epoch)
-                                    jacobians = jcob_det_3(n_grid)
-                                    writer.add_scalar("Mean of sum of negative jacobians in the batch", jacobians, global_step=epoch)
+                                    # writer.add_scalar("Grad loss (scaled)", np.mean(batch_loss_grad), global_step=epoch)
+                                    if transfer is not None: writer.add_scalar(f"Trans regularization", np.mean(batch_loss_trans), global_step=epoch)
 
                                     # tensorboard logging
                                     if epoch % config['sample_every'] == 0:
 
-                                        # inversing negatives of images
-                                        content_image = 1 - content_image
-                                        style_image = 1 - style_image
-                                        output_image = 1 - output_image
-
                                         # image examples and warped grids examples
-                                        img_grid = make_grid(output_image, output_image.shape[0], content_image, style_image, src_cp=content_cp, n_grid=n_grid, device=device)
-                                        writer.add_image("Registration (& transfer) samples", img_grid, global_step=epoch)
+                                        grid = torch.cat([output_image, source_image, style_image], dim=0)
+                                        grid = vutils.make_grid(grid, output_image.shape[0])
+                                        writer.add_image("Registration (& transfer) samples", grid, global_step=epoch)
                                         writer.flush()
 
                                     # model checkpoint
                                     if epoch % config['checkpoint_every'] == 0 and epoch != 0:
                                         torch.save({
                                             'epoch': epoch,
-                                            'nonrigid_model_state_dict': nonrigid.state_dict(),
+                                            'nonrigid_model_state_dict': nonrigid.state_dict() if nonrigid is not None else False,
                                             'tranfer_model_state_dict': transfer.state_dict() if transfer is not None else False,
                                             'optimizer_state_dict': optimizer.state_dict(),
                                             'scheduler_state_dict': scheduler.state_dict(),
                                             }, model_config['checkpoint_path']+exp_path+'.tar')
                                         print('Saved checkpoint\n')
 
-                                    # if epoch % 101 == 0 and epoch != 0:
-                                    #     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: decay**epoch)
-                                    #     print("current state of scheduler:")
-                                    #     print(scheduler.state_dict())
-
-                                # evaluation
-                                # if epoch % config['test_every'] == 0 and epoch != 0:
-
-                                # calculating whole images from patches and rTRE estimations
-                                grid, rTRE = evaluate(AnhirSet, nonrigid_swa, transfer, data_config['main_file_path'], device, data_config['train_root'], data_config['resample_rate'], **params) #NOTE: *4 for reduced dataset
-                                rTRE_list += [rTRE]
-                                # print(f'{rTRE=}')
-                                writer.add_scalar("rTRE metric", rTRE, global_step=epoch)
-                                writer.add_image("Registration (& transfer) test", grid.float(), global_step=epoch)
-                                writer.add_hparams({'lr': learning_rate,
-                                                    'decay': decay,
-                                                    'batch_size': batch_size,
-                                                    'resample_rate': data_config['resample_rate'],
-                                                    'lambda_reg': lambda_reg},
-                                                    {'hparam/loss_ncc': np.mean(batch_loss_ncc),
-                                                    'hparam/rTRE': rTRE,
-                                                    'hparam/jacobians': jacobians})
                                 writer.flush()
 
                                 torch.save({
                                             'epoch': epoch,
-                                            'nonrigid_model_state_dict': nonrigid_swa.state_dict(),
+                                            'transfer_swa_model_state_dict': transfer_swa.state_dict(),
                                             'tranfer_model_state_dict': transfer.state_dict() if transfer is not None else False,
                                             'optimizer_state_dict': optimizer.state_dict(),
                                             'scheduler_state_dict': scheduler.state_dict(),
                                             'swa_scheduler_state_dict': swa_scheduler.state_dict(),
                                             }, model_config['checkpoint_path']+exp_path+'-swa'+'.tar')
                                 print('Saved checkpoint\n')
+# %%
