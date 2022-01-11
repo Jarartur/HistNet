@@ -13,7 +13,7 @@ from losses import Grad, NCC, diffusion, jcob_det_3, ncc_local, curvature_regula
 
 run_identifier = 'whole'
 # run_identifier = 'hparams-testing'
-resize = 6
+resize = 6 # for initial images downsampling
 # %% hparams
 hparams = {
   "lambda_reg_list": [2000],
@@ -29,10 +29,6 @@ hparams = {
 # %% General config
 config = {'epochs': 150,
           'sample_every': 1,
-          # 'flow_every': 1,
-          # 'test_every': 100,
-        #   'lr_scheduler_every': 250,
-          # 'lmbd_grad_reg': 1000,
           'checkpoint_every': 10,
           }
 
@@ -42,8 +38,6 @@ data_config = {'train_root': f'resized_{resize}/',
                'test_root': f'resized_{resize}/',
                'main_file_path': 'raw/edited_data_v3.csv',
                'summary_path': f'runs/hunt/{run_identifier}',
-        #        'sample_dir': 'sample',
-              #  'batch_size': 64,
                'resample_rate': resize,
                'model_checkpoint': 'checkpoints/hunt/hunt-cost_ncc_local-vecint_None-reg_diffusion-lr_0.01-decay_0.97-bsize_8-lmd_reg_8000-lmd_trans_None_3.tar'}
 
@@ -53,9 +47,7 @@ base_transforms = [
         tio.RescaleIntensity(out_min_max=(0, 1)),
         ]
 # %% Model config
-model_config = {#'learning_rate': 1e-4,
-                # 'decay_rate': 0.995,
-                'betas': [0.9, 0.999],
+model_config = {'betas': [0.9, 0.999],
                 'resume': False,
                 'reset_optim': True,
                 'reset_epoch': True,
