@@ -8,10 +8,24 @@ from utils import Align_subject, resizeAndPad, resize_dataset
 from torchvision import transforms
 import torchio as tio
 import os
+from losses import Grad, NCC, diffusion, jcob_det_3, ncc_local, curvature_regularization, mind_loss
+
 
 run_identifier = 'whole'
 # run_identifier = 'hparams-testing'
 resize = 6
+# %% hparams
+hparams = {
+  "lambda_reg_list": [2000],
+  "learning_rate_list": [1e-4],
+  "decay_list": [0.995],
+  "batch_size_list": [8],
+  "reg_functions": [curvature_regularization],
+  "cost_functions": [ncc_local],
+  "vecint_list": [None],
+  "lambda_trans_list": [None],
+  "cielab": False,
+}
 # %% General config
 config = {'epochs': 150,
           'sample_every': 1,

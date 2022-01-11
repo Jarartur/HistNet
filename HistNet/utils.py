@@ -589,7 +589,7 @@ def reset_grads(optims):
 # %% Helpers
 def generate_grid_tc(tensor_size: torch.Tensor, device="cpu"):
     '''
-    © Marek Wodziński
+    Courtesy of: dr. Marek Wodziński
     '''
     identity_transform = torch.eye(len(tensor_size)-1, device=device)[:-1, :].unsqueeze(0)
     identity_transform = torch.repeat_interleave(identity_transform, tensor_size[0], dim=0)
@@ -598,7 +598,7 @@ def generate_grid_tc(tensor_size: torch.Tensor, device="cpu"):
 
 def tc_transform_to_tc_df(transformation: torch.Tensor, size: torch.Size, device: str="cpu"):
     '''
-    © Marek Wodziński
+    Courtesy of: dr. Marek Wodziński
     '''
     deformation_field = F.affine_grid(transformation, size=size, align_corners=False).to(device)
     size = (deformation_field.size(0), 1) + deformation_field.size()[1:-1]
@@ -608,7 +608,7 @@ def tc_transform_to_tc_df(transformation: torch.Tensor, size: torch.Size, device
 
 def tc_df_to_np_df(displacement_field_tc: torch.Tensor):
     '''
-    © Marek Wodziński
+    Courtesy of: dr. Marek Wodziński
     '''
     ndim = len(displacement_field_tc.size()) - 2
     if ndim == 2:
@@ -659,7 +659,7 @@ def rescale_linear(array, minimum, maximum):
 
 def df_field(tensors, displacement_fields, compat=None, device="cpu"):
     '''
-    © Marek Wodziński
+    Courtesy of: dr. Marek Wodziński
     '''
     size = tensors.size()
     no_samples = size[0]
@@ -685,7 +685,7 @@ def df_field(tensors, displacement_fields, compat=None, device="cpu"):
 
 def df_field_v2(tensor: torch.Tensor, displacement_field: torch.Tensor, grid: torch.Tensor=None, device: str="cpu", mode: str='bilinear'):
     """
-    © Marek Wodziński
+    Courtesy of: dr. Marek Wodziński
     Adapted to return displacement fileds
 
     Transforms a tensor with a given displacement field.
@@ -718,7 +718,7 @@ def df_field_v2(tensor: torch.Tensor, displacement_field: torch.Tensor, grid: to
 
 def generate_grid(tensor_size: torch.Tensor, device="cpu"):
     """
-    © Marek Wodziński
+    Courtesy of: dr. Marek Wodziński
     Generates the identity grid for a given tensor size.
 
     Parameters

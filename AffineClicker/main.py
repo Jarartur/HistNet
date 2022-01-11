@@ -124,8 +124,8 @@ save_path = 'data.csv'
 data = pd.read_csv(main_file)
 source_image_list = data.iloc[:, 3]
 target_image_list = data.iloc[:, 5]
-current_image = 452
-counter = 0
+current_image = 452 # adjust for resuming
+counter = 0 # start point (adjust for resuming)
 
 srcTri = np.zeros([4, 2])
 dscTri = np.zeros([4, 2])
