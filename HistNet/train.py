@@ -1,75 +1,73 @@
-# %% Imports
-# PyTorch
-import torch
-from torch.utils.data import DataLoader
-import torch.optim as optim
-import torch.nn.functional as F
-import torchvision.transforms.functional as TF
-import torchvision
-# fancy stuff
-import torch.cuda.amp as amp
-from torch.optim.swa_utils import AveragedModel, SWALR
-# tensorboard
-from torch.utils.tensorboard import SummaryWriter
+if __name__ == '__main__':
+    # %% Imports
+    # PyTorch
+    import torch
+    from torch.utils.data import DataLoader
+    import torch.optim as optim
+    import torch.nn.functional as F
+    import torchvision.transforms.functional as TF
+    import torchvision
+    # fancy stuff
+    import torch.cuda.amp as amp
+    from torch.optim.swa_utils import AveragedModel, SWALR
+    # tensorboard
+    from torch.utils.tensorboard import SummaryWriter
 
-# Additional
-from tqdm import trange, tqdm
-from dataset import AnhirPatches
-import torchio as tio
-import numpy as np
-import os
-import copy
+    # Additional
+    from tqdm import trange, tqdm
+    import torchio as tio
+    import numpy as np
+    import os
+    import copy
 
-# Local modules
-from config import config, base_transforms, data_config, model_config, init_data, lr_config
-from Model.nonrigidnet import Nonrigid_Registration_Network
-from Model.nonrigidnet_v2 import RegistrationNetwork
-from dataset import AnhirPatches
-from utils import load_checkpoint, df_field_v2, he_init, get_images, make_grid, moving_average
-from losses import ncc_loss_global
-from samplev2 import evaluate
-from losses import Grad, NCC, diffusion, jcob_det_3, ncc_local, curvature_regularization, mind_loss
+    # Local modules
+    from dataset import AnhirPatches
+    from config import config, base_transforms, data_config, model_config, init_data
+    from NonRigidNet.nonrigidnet import Nonrigid_Registration_Network
+    from NonRigidNet.nonrigidnet_v2 import RegistrationNetwork
+    from UNet.unet_model import UNet
+    from losses import Grad, NCC, diffusion, jcob_det_3, ncc_local, curvature_regularization, mind_loss
+    from dataset import AnhirPatches
+    from utils import load_checkpoint, df_field_v2, he_init, get_images, make_grid, moving_average, create_pyramid, resample_tensor, register, freeze_nets
+    from losses import ncc_loss_global
+    from samplev2 import evaluate
+    # %%
 
-# %%
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f'Using device: {device}')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'Using device: {device}')
 
-# Check for existing folder with resized data, if not presen make one and populate with resized images from original dataset
-init_data(root='raw/', resize=data_config['resample_rate'], summary_path=data_config['main_file_path'], save_root='')
+    # Check for existing folder with resized data, if not presen make one and populate with resized images from original dataset
+    init_data(root='raw/', resize=data_config['resample_rate'], summary_path=data_config['main_file_path'], save_root='')
 
-rTRE_list = []
+    rTRE_list = []
 
-# %% Hyperparameters definitions
-def train(lambda_reg_list, learning_rate_list, decay_list, batch_size_list, reg_functions, cost_functions, vecint_list, lambda_trans_list, cielab):
-    for lambda_trans in lambda_trans_list:
-        for cost in cost_functions:
-            for int_num in vecint_list:
-                for regularization in reg_functions:
-                    for lambda_reg in lambda_reg_list:
-                        for batch_size in batch_size_list:
-                            for learning_rate in learning_rate_list:
-                                for decay in decay_list:
-                                    if cielab:
-                                        train_transfer_cielab(lambda_trans, cost, int_num, regularization, lambda_reg, batch_size, learning_rate, decay)
-                                    else:
-                                        train_transfer_nonrigid(lambda_trans, cost, int_num, regularization, lambda_reg, batch_size, learning_rate, decay)
 
-def train_transfer_cielab(lambda_trans, cost, int_num, regularization, lambda_reg, batch_size, learning_rate, decay):
+    # %% Hyperparameters definitions
+    lambda_reg = 6000
+    learning_rate = 1e-4
+    decay = 0.99
+    batch_size = 4
+    regularization = diffusion
+    cost = ncc_local
+    lambda_trans = None
+    freeze_list = [2]
+    levels = 2
+    load_levels = [0, 1]
+
+
     # Tensorboard logger annotation and model checkpoint name
-    exp_path = f'-cost_{cost.__name__}-vecint_{int_num}-reg_{regularization.__name__}-lr_{learning_rate}-decay_{decay}-bsize_{batch_size}-lmd_reg_{lambda_reg}-lmd_trans_{lambda_trans}'
+    exp_path = f'-levels_{levels}-freeze_{freeze_list}-cost_{cost.__name__}-reg_{regularization.__name__}-lr_{learning_rate}-decay_{decay}-bsize_{batch_size}-lmd_reg_{lambda_reg}-lmd_trans_{lambda_trans}'
     if cost.__name__ == 'ncc_local': loss_type = 'NCC'
     elif cost.__name__ == 'mind_loss': loss_type = 'MIND'
 
     print("Using name:")
     print(data_config['summary_path']+exp_path)
-    print("Using lr config:")
-    print(lr_config)
     # Dataset initialization
-    AnhirSet = AnhirPatches(data_config['main_file_path'], data_config['train_root'], base_transforms=base_transforms, color_mode='cielab')
+    AnhirSet = AnhirPatches(data_config['main_file_path'], data_config['train_root'], base_transforms=base_transforms)
     dataset = AnhirSet.get_training_subjects()
     # torchio queue for patch-based pipeline
     queue = AnhirSet.get_queue(patch_size=(256, 256, 1),
-                                max_length=batch_size*8*2,
+                                max_length=batch_size*8,
                                 samples_per_volume=batch_size*8,
                                 num_workers=4,
                                 shuffle_subjects=True,
@@ -77,13 +75,26 @@ def train_transfer_cielab(lambda_trans, cost, int_num, regularization, lambda_re
                                 start_background=True,)
     training_loader_patches = torch.utils.data.DataLoader(queue, batch_size=batch_size)
     params = {'patch_size':(256, 256, 1), 'patch_overlap':(20, 20, 0)} # parameters on test-time inference
-    
     # %% Model init
-    transfer = RegistrationNetwork(input_channels=3, ouput_channels=4).apply(he_init).to(device) # for cielab we use all L*a*b channels but ouput only *a*b
-    nonrigid = None
+    # transfer = UNet(6, 6).to(device).apply(he_init)
+    if lambda_trans is not None: transfer = RegistrationNetwork(input_channels=3, ouput_channels=6).apply(he_init).to(device)
+    else: transfer = None
+    channels = 2
+    # if int_num is not None:
+    #     nonrigid = Nonrigid_Registration_Network(channels, vecint=True, num_int=int_num).to(device).apply(he_init)
+    # else:
+    #     nonrigid = Nonrigid_Registration_Network(channels, vecint=False, num_int=int_num).to(device).apply(he_init)
+
+    nonrigid_0 = RegistrationNetwork(input_channels=2, ouput_channels=2).apply(he_init).to(device)
+    nonrigid_1 = RegistrationNetwork(input_channels=2, ouput_channels=2).apply(he_init).to(device)
+    nonrigid_2 = RegistrationNetwork(input_channels=2, ouput_channels=2).apply(he_init).to(device)
+    # nonrigid_ema = copy.deepcopy(nonrigid)
+    # nonrigid = nonrigid.apply(he_init).to(device)
+    # nonrigid_ema = nonrigid.to(device)
 
     nets = []
-    nets += [transfer]
+    nets += [nonrigid_0, nonrigid_1, nonrigid_2]
+    if transfer is not None: nets += [transfer]
 
     # parameters list for optimizer
     parameters = []
@@ -93,164 +104,15 @@ def train_transfer_cielab(lambda_trans, cost, int_num, regularization, lambda_re
     # optimizer, scheduler and tensorboard logger initialization
     optimizer = optim.Adam(parameters, learning_rate, betas=model_config['betas'])
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lambda step: decay**step)
-    transfer_swa = AveragedModel(transfer)
-    
+    # scheduler = None
+    # epochs_oc = config['epochs']-(config['epochs']-lr_config['swa_kickin'])
+    # print(epochs_oc)
+    # scheduler_onecycle = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.01, steps_per_epoch=len(training_loader_patches), epochs=epochs_oc)
+    # scheduler = scheduler_onecycle
+    # SWA
+    # nonrigid_swa = AveragedModel(nonrigid)
 
-    # Logging
-    writer = SummaryWriter(data_config['summary_path']+exp_path)
-
-    # pretrained model resuming if needed
-    if model_config['resume']:
-        if data_config['model_checkpoint'] is not None:
-            epoch_resume = load_checkpoint(data_config['model_checkpoint'], nonrigid, transfer, optimizer, scheduler, model_config=model_config)
-            print("loaded arbitrary model")
-        else:
-            epoch_resume = load_checkpoint(model_config['checkpoint_path']+exp_path+'.tar', nonrigid, transfer, optimizer, scheduler, model_config=model_config)
-            print("loaded previous model")
-    else: epoch_resume = 0
-
-    # main trainloop
-    for epoch in trange(epoch_resume, config['epochs']+1, desc='Epochs'):
-        batch_loss_ncc = []
-        batch_loss_trans = []
-        for samples in tqdm(training_loader_patches, desc='Dataloader'):
-
-            # loading images, transfering to gpu and adding noise
-            source_image, style_image = get_images(samples, device, False)
-
-            # conditional style transfer
-            if transfer is not None:
-                intense_tensor = transfer(source_image, style_image)
-                ab_image = ((source_image[:, 1:3, :, :] * intense_tensor[:, 0:2, :, :]) + intense_tensor[:, 2:, :, :]) # leave L channel alone
-
-            # cielab to rgb shenanigans
-            lab_source = (source_image[:, 0, :, :] * 100).unsqueeze(1)
-            ab_image = ((ab_image * 2) - 1) * 127
-            output_image = torch.cat([lab_source, ab_image], dim=1)
-            output_image = lab_to_rgb(output_image, clip=True)
-
-            ab_source = ((source_image[:, 1:3, :, :] * 2) - 1) * 127
-            source_image = torch.cat([lab_source, ab_source], dim=1)
-            source_image = lab_to_rgb(source_image, clip=True)
-
-            lab_style = (style_image[:, 0, :, :] * 100).unsqueeze(1)
-            ab_style = ((style_image[:, 1:3, :, :] * 2) - 1) * 127
-            style_image = torch.cat([lab_style, ab_style], dim=1)
-            style_image = lab_to_rgb(style_image, clip=True)
-
-            # transfer to grayscale
-            output_image = TF.rgb_to_grayscale(output_image)
-            style_image = TF.rgb_to_grayscale(style_image)
-            source_image = TF.rgb_to_grayscale(source_image)
-
-            # loss
-            loss_ncc = cost(output_image, style_image, device)
-            if transfer is not None: loss_transfer = lambda_trans*diffusion(intense_tensor, device)
-            loss = loss_ncc
-            if transfer is not None: loss = loss + loss_transfer
-            batch_loss_ncc += [loss_ncc.item()]
-            if transfer is not None: batch_loss_trans += [loss_transfer.item()]
-
-            # gradient calculations
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-
-
-        # lr adjustments
-        if epoch == lr_config['swa_kickin']:
-            print(f'lr for swa: {scheduler.get_last_lr()}')
-            swa_scheduler = SWALR(optimizer, swa_lr=scheduler.get_last_lr())
-            print(f'swa scheduler init, {epoch=}')
-        elif epoch > lr_config['swa_kickin']:
-            transfer_swa.update_parameters(nonrigid)
-            swa_scheduler.step()
-        elif epoch >= lr_config['decay_kickin']:
-            scheduler.step()
-
-        # tensorboard loging
-        writer.add_scalar(f"Learning rate", optimizer.param_groups[0]['lr'], global_step=epoch)
-        writer.add_scalar(f"{loss_type} loss", np.mean(batch_loss_ncc), global_step=epoch)
-        # writer.add_scalar("Grad loss (scaled)", np.mean(batch_loss_grad), global_step=epoch)
-        if transfer is not None: writer.add_scalar(f"Trans regularization", np.mean(batch_loss_trans), global_step=epoch)
-
-        # tensorboard logging
-        if epoch % config['sample_every'] == 0:
-
-            # image examples and warped grids examples
-            grid = torch.cat([output_image, source_image, style_image], dim=0)
-            grid = vutils.make_grid(grid, output_image.shape[0])
-            writer.add_image("Registration (& transfer) samples", grid, global_step=epoch)
-            writer.flush()
-
-        # model checkpoint
-        if epoch % config['checkpoint_every'] == 0 and epoch != 0:
-            torch.save({
-                'epoch': epoch,
-                'nonrigid_model_state_dict': nonrigid.state_dict() if nonrigid is not None else False,
-                'tranfer_model_state_dict': transfer.state_dict() if transfer is not None else False,
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                }, model_config['checkpoint_path']+exp_path+'.tar')
-            print('Saved checkpoint\n')
-
-    writer.flush()
-
-    torch.save({
-                'epoch': epoch,
-                'transfer_swa_model_state_dict': transfer_swa.state_dict(),
-                'tranfer_model_state_dict': transfer.state_dict() if transfer is not None else False,
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'swa_scheduler_state_dict': swa_scheduler.state_dict(),
-                }, model_config['checkpoint_path']+exp_path+'-swa'+'.tar')
-    print('Saved checkpoint\n')
-
-def train_transfer_nonrigid(lambda_trans, cost, int_num, regularization, lambda_reg, batch_size, learning_rate, decay):
-
-    # Tensorboard logger annotation and model checkpoint name
-    exp_path = f'-cost_{cost.__name__}-vecint_{int_num}-reg_{regularization.__name__}-lr_{learning_rate}-decay_{decay}-bsize_{batch_size}-lmd_reg_{lambda_reg}-lmd_trans_{lambda_trans}'
-    if cost.__name__ == 'ncc_local': loss_type = 'NCC'
-    elif cost.__name__ == 'mind_loss': loss_type = 'MIND'
-
-    print("Using name:")
-    print(data_config['summary_path']+exp_path)
-    print("Using lr config:")
-    print(lr_config)
-    # Dataset initialization
-    AnhirSet = AnhirPatches(data_config['main_file_path'], data_config['train_root'], base_transforms=base_transforms)
-    dataset = AnhirSet.get_training_subjects()
-    # torchio queue for patch-based pipeline
-    queue = AnhirSet.get_queue(patch_size=(256, 256, 1),
-                                max_length=batch_size*8*2,
-                                samples_per_volume=batch_size*8,
-                                num_workers=4,
-                                shuffle_subjects=True,
-                                shuffle_patches=False,
-                                start_background=True,)
-    training_loader_patches = torch.utils.data.DataLoader(queue, batch_size=batch_size)
-    params = {'patch_size':(256, 256, 1), 'patch_overlap':(20, 20, 0)} # parameters on test-time inference
-    # %% Model init
-    if lambda_trans is not None: transfer = RegistrationNetwork(input_channels=3, ouput_channels=6).apply(he_init).to(device)
-    else: transfer = None
-
-    nonrigid = RegistrationNetwork(input_channels=1, ouput_channels=2).apply(he_init).to(device)
-
-    nets = []
-    nets += [nonrigid]
-    if transfer is not None: nets += [transfer]
-
-    # parameters list for optimizer
-    parameters = []
-    for net in nets:
-        parameters += list(net.parameters())
-
-    # optimizer, scheduler initialization
-    optimizer = optim.Adam(parameters, learning_rate, betas=model_config['betas'])
-    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lambda step: decay**step)
-
-    # Stochastic Weights Averaging
-    nonrigid_swa = AveragedModel(nonrigid)
+    # scaler = amp.GradScaler()
 
 
     # Logging
@@ -259,12 +121,14 @@ def train_transfer_nonrigid(lambda_trans, cost, int_num, regularization, lambda_
     # pretrained model resuming if needed
     if model_config['resume']:
         if data_config['model_checkpoint'] is not None:
-            epoch_resume = load_checkpoint(data_config['model_checkpoint'], nonrigid, transfer, optimizer, scheduler, model_config=model_config)
+            epoch_resume = load_checkpoint(data_config['model_checkpoint'], nets, load_levels, transfer, optimizer, scheduler, model_config=model_config)
             print("loaded arbitrary model")
         else:
-            epoch_resume = load_checkpoint(model_config['checkpoint_path']+exp_path+'.tar', nonrigid, transfer, optimizer, scheduler, model_config=model_config)
+            epoch_resume = load_checkpoint(model_config['checkpoint_path']+exp_path+'.tar', nets, load_levels, transfer, optimizer, scheduler, model_config=model_config)
             print("loaded previous model")
     else: epoch_resume = 0
+
+    freeze_nets(nets, freeze_list)
 
     # main trainloop
     for epoch in trange(epoch_resume, config['epochs']+1, desc='Epochs'):
@@ -291,37 +155,61 @@ def train_transfer_nonrigid(lambda_trans, cost, int_num, regularization, lambda_
             content_image = 1 - content_image
             style_image = 1 - style_image
 
-            # non rigid transform
-            deformation_field = nonrigid(style_image, content_image)
-            n_grid = df_field_v2(content_image, deformation_field, None, device)
-            output_image = F.grid_sample(content_image, n_grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+            content_pyramid = create_pyramid(content_image, len(nets))
+            style_pyramid = create_pyramid(style_image, len(nets))
 
+            # non rigid transform
+
+            output_images, n_grids, deformation_fields = register(nets, content_pyramid, style_pyramid, levels, device)
+            # output_image = F.grid_sample(content_image, n_grid, mode='bilinear', padding_mode='zeros', align_corners=False)
             # loss
-            loss_ncc = cost(output_image, style_image, device)
-            loss_grad = lambda_reg*regularization(deformation_field, device)
+
+            loss_grad = 0
+            for deformation in deformation_fields:
+                loss_grad += lambda_reg*regularization(deformation, device)
+            
+            loss_ncc = 0
+            if len(output_images) == 1:
+                loss_ncc += cost(output_images[0], style_pyramid[-1], device)
+            else:
+                for i, image in enumerate(output_images):
+                    loss_ncc += cost(image, style_pyramid[i], device)
+
             if transfer is not None: loss_transfer = lambda_trans*diffusion(intense_tensor, device)
-            loss = loss_ncc + loss_grad
             if transfer is not None: loss = loss + loss_transfer
             batch_loss_ncc += [loss_ncc.item()]
             batch_loss_grad += [loss_grad.item()]
             if transfer is not None: batch_loss_trans += [loss_transfer.item()]
 
+            loss = loss_ncc + loss_grad
+
             # gradient calculations
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
+            # if epoch < lr_config['swa_kickin']:
+            #     scheduler_onecycle.step()
+            #     # print('lr adjusted')
 
         # lr adjustments
-        if epoch == lr_config['swa_kickin']:
-            print(f'lr for swa: {scheduler.get_last_lr()}')
-            swa_scheduler = SWALR(optimizer, swa_lr=scheduler.get_last_lr())
-            print(f'swa scheduler init, {epoch=}')
-        elif epoch > lr_config['swa_kickin']:
-            nonrigid_swa.update_parameters(nonrigid)
-            swa_scheduler.step()
-        elif epoch >= lr_config['decay_kickin']:
-            scheduler.step()
-
+        # if epoch == lr_config['swa_kickin']:
+        #     print(f'lr for swa: {scheduler.get_last_lr()}')
+        #     swa_scheduler = SWALR(optimizer, swa_lr=scheduler.get_last_lr())
+        #     print(f'swa scheduler init, {epoch=}')
+        # elif epoch > lr_config['swa_kickin']:
+        #     nonrigid_swa.update_parameters(nonrigid)
+        #     swa_scheduler.step()
+        #     # print(f'changed swa, {epoch=}')
+        # elif epoch >= lr_config['decay_kickin']:
+        scheduler.step()
+            # print(f'changed decay, {epoch=}')
+        # moving_average(nonrigid, nonrigid_ema, beta=0.999)
+        
+        content_image = content_pyramid[-1]
+        style_image = style_pyramid[-1]
+        output_image = output_images[-1]
+        n_grid = n_grids[-1]
+        deformation_field = deformation_fields[-1]
         # tensorboard loging
         writer.add_scalar(f"Learning rate", optimizer.param_groups[0]['lr'], global_step=epoch)
         writer.add_scalar(f"{loss_type} loss", np.mean(batch_loss_ncc), global_step=epoch)
@@ -332,7 +220,7 @@ def train_transfer_nonrigid(lambda_trans, cost, int_num, regularization, lambda_
 
         # tensorboard logging
         if epoch % config['sample_every'] == 0:
-
+        
             # inversing negatives of images
             content_image = 1 - content_image
             style_image = 1 - style_image
@@ -344,41 +232,53 @@ def train_transfer_nonrigid(lambda_trans, cost, int_num, regularization, lambda_
             writer.flush()
 
         # model checkpoint
-        if epoch % config['checkpoint_every'] == 0 and epoch != 0:
-            torch.save({
+        if epoch % config['checkpoint_every'] == 0:
+            save_dict = {
                 'epoch': epoch,
-                'nonrigid_model_state_dict': nonrigid.state_dict(),
                 'tranfer_model_state_dict': transfer.state_dict() if transfer is not None else False,
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
-                }, model_config['checkpoint_path']+exp_path+'.tar')
+                }
+            nets_dict = {f'nonrigid_{i}': nets[i].state_dict() for i in range(len(nets))}
+            save_dict = {**save_dict, **nets_dict}
+            torch.save(save_dict, model_config['checkpoint_path']+exp_path+'.tar')
             print('Saved checkpoint\n')
 
-    # calculating whole images from patches and rTRE estimations
-    grid, rTRE = evaluate(AnhirSet, nonrigid_swa, transfer, data_config['main_file_path'], device, data_config['train_root'], data_config['resample_rate'], **params) #NOTE: *4 for reduced dataset
-    rTRE_list += [rTRE]
-    writer.add_scalar("rTRE metric", rTRE, global_step=epoch)
-    writer.add_image("Registration (& transfer) test", grid.float(), global_step=epoch)
-    writer.add_hparams({'lr': learning_rate,
-                        'decay': decay,
-                        'batch_size': batch_size,
-                        'resample_rate': data_config['resample_rate'],
-                        'lambda_reg': lambda_reg},
-                        {'hparam/loss_ncc': np.mean(batch_loss_ncc),
-                        'hparam/rTRE': rTRE,
-                        'hparam/jacobians': jacobians})
-    writer.flush()
+        # if epoch % 101 == 0 and epoch != 0:
+        #     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: decay**epoch)
+        #     print("current state of scheduler:")
+        #     print(scheduler.state_dict())
 
-    torch.save({
+        # evaluation
+        # if epoch % config['test_every'] == 0 and epoch != 0:
+
+        # calculating whole images from patches and rTRE estimations
+        if epoch % config['eval_every'] == 0:
+            grid, rTRE = evaluate(AnhirSet, nets, levels, transfer, data_config['main_file_path'], device, data_config['train_root'], data_config['resample_rate'], **params) #NOTE: *4 for reduced dataset
+            rTRE_list += [rTRE]
+
+            # print(f'{rTRE=}')
+            writer.add_scalar("rTRE metric", rTRE, global_step=epoch)
+            if grid is not None:
+                writer.add_image("Registration (& transfer) test", grid.float(), global_step=epoch)
+            writer.add_hparams({'lr': learning_rate,
+                                'decay': decay,
+                                'batch_size': batch_size,
+                                'resample_rate': data_config['resample_rate'],
+                                'lambda_reg': lambda_reg},
+                                {'hparam/loss_ncc': np.mean(batch_loss_ncc),
+                                'hparam/rTRE': rTRE,
+                                'hparam/jacobians': jacobians})
+
+        writer.flush()
+
+    save_dict = {
                 'epoch': epoch,
-                'nonrigid_model_state_dict': nonrigid_swa.state_dict(),
                 'tranfer_model_state_dict': transfer.state_dict() if transfer is not None else False,
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
-                'swa_scheduler_state_dict': swa_scheduler.state_dict(),
-                }, model_config['checkpoint_path']+exp_path+'-swa'+'.tar')
+                }
+    nets_dict = {f'nonrigid_{i}': nets[i].state_dict() for i in range(len(nets))}
+    save_dict = {**save_dict, **nets_dict}
+    torch.save(save_dict, model_config['checkpoint_path']+exp_path+'.tar')
     print('Saved checkpoint\n')
-
-if __name__ == '__main__':
-    from config import hparams
-    train(hparams["lambda_reg_list"], hparams["learning_rate_list"], hparams["decay_list"], hparams["batch_size_list"], hparams["reg_functions"], hparams["cost_functions"], hparams["vecint_list"], hparams["lambda_trans_list"], hparams["cielab"])

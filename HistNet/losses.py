@@ -14,7 +14,7 @@ from utils import df_field_v2, tc_df_to_np_df
 def ncc_local(sources, targets, device="cpu", **params):
     """
     Implementation inspired by VoxelMorph (with some modifications).
-    Courtesy of: dr. Marek Wodziński
+    © Marek Wodziński
     """
     ndim = len(sources.size()) - 2
     if ndim not in [2, 3]:
@@ -47,7 +47,6 @@ def ncc_local(sources, targets, device="cpu", **params):
     return -torch.mean(ncc)
 
 def mind_loss(sources, targets, device="cpu", **params):
-    '''Courtesy of: dr. Marek Wodziński'''
     sources = sources.view(sources.size(0), sources.size(1), sources.size(2), sources.size(3), 1)
     targets = targets.view(targets.size(0), targets.size(1), targets.size(2), targets.size(3), 1)
     try:
@@ -57,7 +56,6 @@ def mind_loss(sources, targets, device="cpu", **params):
     except:
         return torch.mean((MINDSSC(sources, device=device) - MINDSSC(targets, device=device))**2)
 def pdist_squared(x):
-    '''Courtesy of: dr. Marek Wodziński'''
     xx = (x**2).sum(dim=1).unsqueeze(2)
     yy = xx.permute(0, 2, 1)
     dist = xx + yy - 2.0 * torch.bmm(x.permute(0, 2, 1), x)
@@ -65,7 +63,6 @@ def pdist_squared(x):
     dist = torch.clamp(dist.float(), 0.0, np.inf)
     return dist
 def MINDSSC(img, radius=2, dilation=2, device="cpu"):
-    '''Courtesy of: dr. Marek Wodziński'''
     kernel_size = radius * 2 + 1
     six_neighbourhood = torch.Tensor([[0,1,1],
                                       [1,1,0],
@@ -96,7 +93,7 @@ def MINDSSC(img, radius=2, dilation=2, device="cpu"):
 class NCC:
     """
     Local (over window) normalized cross correlation loss.
-    Adapted from VoxelMorph.
+    Taken from VoxelMorph.
     """
 
     def __init__(self, device='cpu', win=None):
@@ -165,13 +162,13 @@ def ncc_loss(output, target):
 
 def ncc_loss_global(source, target, device="cpu"):
     '''
-    Adapted from DeepHistReg.
+    Taken from DeepHistReg.
     '''
     return ncc_losses_global(source, target, device=device)
 
 def ncc_losses_global(sources, targets, device="cpu"):
     '''
-    Adapted from DeepHistReg.
+    Taken from DeepHistReg.
     '''
     ncc = ncc_global(sources, targets, device=device)
     ncc = torch.mean(ncc)
@@ -181,7 +178,7 @@ def ncc_losses_global(sources, targets, device="cpu"):
 
 def ncc_global(sources, targets, device="cpu"):
     '''
-    Adapted from DeepHistReg.
+    Taken from DeepHistReg.
     '''
     size = sources.size(2)*sources.size(3)
     sources_mean = torch.mean(sources, dim=(1, 2, 3)).view(sources.size(0), 1, 1, 1)
@@ -194,7 +191,7 @@ def ncc_global(sources, targets, device="cpu"):
 class Grad:
     """
     2-D gradient loss.
-    Adapted from VoxelMorph.
+    Taken from VoxelMorph.
     """
 
     def __init__(self, penalty='l1', loss_mult=None):
@@ -218,7 +215,7 @@ class Grad:
 
 def diffusion(displacement_field, device='cpu'):
     '''
-    Courtesy of: Marek Wodziński
+    © Marek Wodziński
     '''
     dx = (displacement_field[:, 1:, :, :] - displacement_field[:, :-1, :, :])**2
     dy = (displacement_field[:, :, 1:, :] - displacement_field[:, :, :-1, :])**2
@@ -227,7 +224,7 @@ def diffusion(displacement_field, device='cpu'):
 
 def curvature_regularization(displacement_fields, device="cpu"):
     '''
-    Adapted from DeepHistReg
+    Taken from DeepHistReg
     '''
     u_x = displacement_fields[:, :, :, 0].view(-1, 1, displacement_fields.size(1), displacement_fields.size(2))
     u_y = displacement_fields[:, :, :, 1].view(-1, 1, displacement_fields.size(1), displacement_fields.size(2))
@@ -240,13 +237,16 @@ def curvature_regularization(displacement_fields, device="cpu"):
 
 def tensor_laplacian(tensor, device="cpu"):
     '''
-    Adapted from DeepHistReg
+    Taken from DeepHistReg
     '''
     laplacian_filter = torch.Tensor([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]]).to(device)
     laplacian = F.conv2d(tensor, laplacian_filter.view(1, 1, 3, 3), padding=1) / 9
     return laplacian
 # %% dynamic regularization parameter
 def lambda_reg(epoch, car=10, kar=4, device='cpu', shift=0):
+    '''
+    Taken from some article I forgot but have in my notes somewhere.
+    '''
     n = torch.tensor([epoch/kar], device=device)
     loss = (car*kar)/(kar + torch.exp(n))
     if loss != loss:
@@ -285,7 +285,7 @@ def jcob_det_2(displacement_field):
 
 def jcob_det_3(displacement_fields, spacing=(1.0, 1.0)):
     '''
-    Courtesy of: Marek Wodziński
+    © Marek Wodziński
     '''
     jac_det = []
     for i in range(displacement_fields.shape[0]):

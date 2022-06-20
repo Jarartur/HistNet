@@ -1,5 +1,5 @@
 # %% Imports
-from typing import Union
+from typing import Union, List
 import numpy as np
 from numpy.lib.arraysetops import isin
 from numpy.matrixlib.defmatrix import matrix
@@ -19,6 +19,125 @@ import torchio as tio
 import shutil
 import tqdm
 #%%
+def freeze_nets(nets, levels_to_freeze: List[int]=None):
+    if levels_to_freeze is not None:
+        for i, net in enumerate(nets):
+            if i in levels_to_freeze:
+                print(f'Freezeing network #{i}')
+                for param in net.parameters():
+                    param.requires_grad = False
+
+def register(nets, content_pyramid, style_pyramid, levels = 1, device='cpu'):
+    output_image = []
+    n_grid = []
+    deformation_fields = []
+
+    deformation_field = nets[0](style_pyramid[0], content_pyramid[0])
+    
+    if levels == 1:
+        deformation_field_up = F.interpolate(deformation_field.permute(0, 3, 1, 2), size=(content_pyramid[-1].size()[2:]), mode='bilinear', align_corners=False)
+        output_image_n, n_grid_n = df_field_v2(content_pyramid[-1], deformation_field_up.permute(0, 2, 3, 1), None, device)
+        output_image += [output_image_n]
+        n_grid += [n_grid_n]
+        deformation_fields += [deformation_field_up]
+    elif levels == 2:
+        output_image_0, n_grid_0 = df_field_v2(content_pyramid[0], deformation_field, None, device)
+        output_image += [output_image_0]
+        n_grid += [n_grid_0]
+        deformation_fields += [deformation_field]
+
+        for i in range(1, 2):
+            deformation_field_up = F.interpolate(deformation_field.permute(0, 3, 1, 2), size=(content_pyramid[i].size()[2:]), mode='bilinear', align_corners=False)
+            # input = torch.cat((content_pyramid[i], deformation_field_up), dim=1)
+            input, _ = df_field_v2(content_pyramid[i], deformation_field_up.permute(0, 2, 3, 1), None, device)
+            deformation_field = nets[i](style_pyramid[i], input)
+            deformation_fields += [deformation_field]
+            output_image_n, n_grid_n = df_field_v2(content_pyramid[i], deformation_field, None, device)
+            output_image += [output_image_n]
+            n_grid += [n_grid_n]
+        
+        deformation_field_up = F.interpolate(deformation_field.permute(0, 3, 1, 2), size=(content_pyramid[-1].size()[2:]), mode='bilinear', align_corners=False)
+        output_image_n, n_grid_n = df_field_v2(content_pyramid[-1], deformation_field_up.permute(0, 2, 3, 1), None, device)
+        output_image += [output_image_n]
+        n_grid += [n_grid_n]
+
+    elif levels == 3:
+        output_image_0, n_grid_0 = df_field_v2(content_pyramid[0], deformation_field, None, device)
+        output_image += [output_image_0]
+        n_grid += [n_grid_0]
+        deformation_fields += [deformation_field]
+        for i in range(1, 3):
+            deformation_field_up = F.interpolate(deformation_field.permute(0, 3, 1, 2), size=(content_pyramid[i].size()[2:]), mode='bilinear', align_corners=False)
+            # input = torch.cat((content_pyramid[i], deformation_field_up), dim=1)
+            input, _ = df_field_v2(content_pyramid[i], deformation_field_up.permute(0, 2, 3, 1), None, device)
+            deformation_field = nets[i](style_pyramid[i], input)
+            deformation_fields += [deformation_field]
+            output_image_n, n_grid_n = df_field_v2(content_pyramid[i], deformation_field, None, device)
+            output_image += [output_image_n]
+            n_grid += [n_grid_n]
+    
+    return output_image, n_grid, deformation_fields
+
+def create_pyramid(tensor: torch.Tensor, num_levels: int, device: str=None, mode: str='bilinear'):
+    #TODO: device [✔]
+    """
+    Creates the resolution pyramid of the input tensor (assuming uniform resampling step = 2).
+    Parameters
+    ----------
+    tensor : tc.Tensor
+        The input tensor
+    num_levels: int
+        The number of output levels
+    device : str
+        The device used for the calculation (e.g. "cpu" or "cuda:0")
+    mode : str
+        The interpolation mode ("bilinear" or "nearest")
+    
+    Returns
+    ----------
+    pyramid: list of tc.Tensor
+        The created resolution pyramid
+    TO DO: Add optional Gaussian filtering to avoid aliasing for deep pyramids
+    """
+    device = device if device is not None else tensor.device
+    pyramid = []
+    for i in range(num_levels):
+        if i == num_levels - 1:
+            pyramid.append(tensor)
+        else:
+            current_size = tensor.size()
+            new_size = (int(current_size[j]/(2**(num_levels-i-1))) if j > 1 else current_size[j] for j in range(len(current_size)))
+            new_size = torch.Size(new_size)
+            new_tensor = resample_tensor(tensor, new_size, device=device, mode=mode)
+            pyramid.append(new_tensor)
+    return pyramid
+
+def resample_tensor(tensor: torch.Tensor, new_size: torch.Tensor, device: str=None, mode: str='bilinear'):
+    #TODO: device [✔]
+    """
+    Resamples the input tensor to a given, new size (may be used both for down and upsampling).
+    Uses F.grid_sample for the structured data interpolation (only linear and nearest supported).
+    Be careful - the autogradient calculation is possible only with mode set to "bilinear".
+    Parameters
+    ----------
+    tensor : tc.Tensor
+        The tensor to be resampled (BxYxXxZxD)
+    new_size : tc.Tensor (or list, or tuple)
+        The resampled tensor size
+    device : str
+        The device used for resampling (e.g. "cpu" or "cuda:0")
+    mode : str
+        The interpolation mode ("bilinear" or "nearest")
+    Returns
+    ----------
+    resampled_tensor : tc.Tensor
+        The resampled tensor (Bxnew_sizexD)
+    """
+    device = device if device is not None else tensor.device
+    sampling_grid = generate_grid(new_size, device=device)
+    resampled_tensor = F.grid_sample(tensor, sampling_grid, mode=mode, padding_mode='zeros', align_corners=False)
+    return resampled_tensor
+
 def resize_dataset(root, factor, summary_path, savepath):
     '''
     Creating folders and resampling images to speed up training.
@@ -102,16 +221,17 @@ def get_gaussian_kernel(device='cpu', kernel_size=3, sigma=2, channels=3):
     gaussian_filter.weight.requires_grad = False
     return gaussian_filter
 
-def load_checkpoint(checkpoint_path, model_registration, model_transfer, optimizer, scheduler, model_config):
+def load_checkpoint(checkpoint_path, nets_registration, levels, model_transfer, optimizer, scheduler, model_config, scheduler_swa=None):
     '''
     General checkpoint loading
     '''
     checkpoint = torch.load(checkpoint_path)
-
-    if model_registration is not None:
-        model_registration.load_state_dict(checkpoint['nonrigid_model_state_dict'])
-        model_registration.train()
-        print('loaded registration model weights')
+    for i, net in enumerate(nets_registration):
+        if i in levels:
+            net.load_state_dict(checkpoint[f'nonrigid_{i}'])
+            net.train()
+            print(f'loaded:{i}')
+    print('loaded registration models weights')
     if model_transfer is not None:
         model_transfer.load_state_dict(checkpoint['tranfer_model_state_dict'])
         model_transfer.train()
@@ -121,6 +241,8 @@ def load_checkpoint(checkpoint_path, model_registration, model_transfer, optimiz
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         print('restored optims')
     else: print('reset/default optims')
+    # if scheduler_swa is not None: scheduler_swa
+    # if scaler is not None: scaler.load_state_dict(checkpoint['scaler_state_dict'])
     if model_config['reset_epoch']:
         epoch = 0
         print('starting epoch=0')
@@ -167,7 +289,7 @@ def warp_checks(n_grid, shape, device, **params):
     # grid = vutils.make_grid(warped_checks, warped_checks.shape[0])
     return warped_checks
 
-def make_checks(shape, device, num_stripes=16, width=2):
+def make_checks(shape, device, num_stripes=8, width=4):
     '''
     Creates grid for warping with displacement fields
     '''
@@ -222,12 +344,20 @@ def make_grid(outputs: list, rows, srcs: list, trgs: list, src_cp=None, **params
         x_size = max(x_sizes)
         y_size = max(y_sizes)
 
+        print(f'{x_size=}')
+        print(f'{y_size=}')
+
         for output, src, trg in zip(outputs, srcs, trgs):
-            pad_x = np.round(x_size-output.shape[-2]).astype(int)
+            
+            print(f'{output.shape[-2]=}')
+            pad_x = np.ceil(x_size-output.shape[-2]).astype(int) #Hack: potential bug from rounding on big images
+            print(f'{pad_x=}')
             pad_x = pad_x / 2
             pad_x_1, pad_x_2 = np.floor(pad_x).astype(int), np.ceil(pad_x).astype(int)
-
-            pad_y = np.round(y_size-output.shape[-1]).astype(int)
+            
+            print(f'{output.shape[-1]=}')
+            pad_y = np.ceil(y_size-output.shape[-1]).astype(int)
+            print(f'{pad_y=}')
             pad_y = pad_y / 2
             pad_y_1, pad_y_2 = np.floor(pad_y).astype(int), np.ceil(pad_y).astype(int)
 
@@ -235,9 +365,14 @@ def make_grid(outputs: list, rows, srcs: list, trgs: list, src_cp=None, **params
             outs += [F.pad(output, pad)]
             s += [F.pad(src, pad)]
             t += [F.pad(trg, pad)]
+
+            print(f'{F.pad(output, pad).shape=}')
+            print(f'{F.pad(src, pad).shape=}')
+            print(f'{F.pad(trg, pad).shape=}')
         
         outs = torch.cat(outs)
-        srcs = torch.cat(s)
+        srcs = torch.cat(s) #BUG: RuntimeError: Sizes of tensors must match except in dimension 0. Expected size 5923 but got size 5713 for tensor number 1 in the list.
+        #NOTE: can't reproduce it
         trgs = torch.cat(t)
         grid = torch.cat([srcs, outs, trgs], dim=0)
         grid = vutils.make_grid(grid, rows)
@@ -250,21 +385,16 @@ class Align_subject():
     Aligns src and trg images by affine matrix from summary_file.
     It is apllied before the images are patchified.
     '''
-    def __init__(self, resample_rate=15, color_mode='bgr', whole_mode_size=None) -> None:
+    def __init__(self, resample_rate=15) -> None:
         self.resample_rate = resample_rate
-        self.colorspace = color_mode
-        self.whole_mode = whole_mode_size
     
     def __call__(self, data):
-        return self.align_subject(data, self.resample_rate, self.colorspace, whole_mode_size=self.whole_mode)
+        return self.align_subject(data, self.resample_rate)
 
     @staticmethod
-    def align_subject(subject, resample_rate=15, color_mode='bgr', whole_mode_size=None):
+    def align_subject(subject, resample_rate=15):
         '''1st Transform for tio.Compose'''
-        if color_mode == 'bgr' or color_mode == 'rgb':
-            padColor=255
-        elif color_mode == 'cielab':
-            padColor=[255,128,128] # hard-coded padding color
+        padColor=255 # hard-coded padding color
         # getting data from torchio subject (which we get from iterating over SubjectDataset)
         src_img = subject['src'][tio.DATA].squeeze(3).permute(1, 2, 0).numpy()
         trg_img = subject['trg'][tio.DATA].squeeze(3).permute(1, 2, 0).numpy()
@@ -281,9 +411,8 @@ class Align_subject():
         assert tuple(shape) == src_img.shape == trg_img.shape
 
         # additional resizing
-        if resample_rate != 1:
-            src_img = resample(src_img, resample_rate)
-            trg_img = resample(trg_img, resample_rate)
+        src_img = resample(src_img, resample_rate)
+        trg_img = resample(trg_img, resample_rate)
         assert src_img.shape == trg_img.shape
         shape = src_img.shape
 
@@ -294,10 +423,6 @@ class Align_subject():
                                 (src_img.shape[1], src_img.shape[0]), 
                                 borderMode=cv2.BORDER_CONSTANT, 
                                 borderValue=padColor)
-
-        if whole_mode_size is not None:
-            warp_img = resizeAndPad(warp_img, whole_mode_size, padColor) #TOCHANGE not ideal way
-            trg_img = resizeAndPad(trg_img, whole_mode_size, padColor)
 
         # dummy singleton dimension (torchio works on 3D images by default)
         src_img = warp_img.transpose(2, 0, 1)[..., np.newaxis]
@@ -370,7 +495,7 @@ def resample(img, factor: Union[int, float]=2, padColor=255):
     scaled_img = cv2.resize(img, (sw, sh), interpolation=interp)
     return scaled_img
 
-def resizeAndPad(img, size=(256, 256), padColor=255, **kwargs):
+def resizeAndPad(img, size=(256, 256), padColor:int=255, **kwargs):
     '''
     - Currently not in use -
 
@@ -589,7 +714,7 @@ def reset_grads(optims):
 # %% Helpers
 def generate_grid_tc(tensor_size: torch.Tensor, device="cpu"):
     '''
-    Courtesy of: dr. Marek Wodziński
+    © Marek Wodziński
     '''
     identity_transform = torch.eye(len(tensor_size)-1, device=device)[:-1, :].unsqueeze(0)
     identity_transform = torch.repeat_interleave(identity_transform, tensor_size[0], dim=0)
@@ -598,7 +723,7 @@ def generate_grid_tc(tensor_size: torch.Tensor, device="cpu"):
 
 def tc_transform_to_tc_df(transformation: torch.Tensor, size: torch.Size, device: str="cpu"):
     '''
-    Courtesy of: dr. Marek Wodziński
+    © Marek Wodziński
     '''
     deformation_field = F.affine_grid(transformation, size=size, align_corners=False).to(device)
     size = (deformation_field.size(0), 1) + deformation_field.size()[1:-1]
@@ -608,7 +733,7 @@ def tc_transform_to_tc_df(transformation: torch.Tensor, size: torch.Size, device
 
 def tc_df_to_np_df(displacement_field_tc: torch.Tensor):
     '''
-    Courtesy of: dr. Marek Wodziński
+    © Marek Wodziński
     '''
     ndim = len(displacement_field_tc.size()) - 2
     if ndim == 2:
@@ -659,7 +784,7 @@ def rescale_linear(array, minimum, maximum):
 
 def df_field(tensors, displacement_fields, compat=None, device="cpu"):
     '''
-    Courtesy of: dr. Marek Wodziński
+    © Marek Wodziński
     '''
     size = tensors.size()
     no_samples = size[0]
@@ -685,7 +810,7 @@ def df_field(tensors, displacement_fields, compat=None, device="cpu"):
 
 def df_field_v2(tensor: torch.Tensor, displacement_field: torch.Tensor, grid: torch.Tensor=None, device: str="cpu", mode: str='bilinear'):
     """
-    Courtesy of: dr. Marek Wodziński
+    © Marek Wodziński
     Adapted to return displacement fileds
 
     Transforms a tensor with a given displacement field.
@@ -713,12 +838,12 @@ def df_field_v2(tensor: torch.Tensor, displacement_field: torch.Tensor, grid: to
     if grid is None:
         grid = generate_grid(tensor.size(), device=device)
     sampling_grid = grid + displacement_field
-    # transformed_tensor = F.grid_sample(tensor, sampling_grid, mode=mode, padding_mode='zeros', align_corners=False)
-    return sampling_grid
+    transformed_tensor = F.grid_sample(tensor, sampling_grid, mode=mode, padding_mode='zeros', align_corners=False)
+    return transformed_tensor, sampling_grid
 
 def generate_grid(tensor_size: torch.Tensor, device="cpu"):
     """
-    Courtesy of: dr. Marek Wodziński
+    © Marek Wodziński
     Generates the identity grid for a given tensor size.
 
     Parameters
