@@ -15,9 +15,9 @@ from dataset import AnhirPatches
 from tqdm import tqdm
 import torch.cuda.amp as amp
 
-from utils import resizeAndPad_landmarks, tc_df_to_np_df, df_field_v2, scale_patch, rescale_to_tc_df, make_grid, resample_landmarks, df_field
+from utils import resizeAndPad_landmarks, tc_df_to_np_df, df_field_v2, scale_patch, rescale_to_tc_df, make_grid, resample_landmarks, df_field, register, create_pyramid
 
-def evaluate(DataSet, registration_model, transfer_model, main_file_path, device, data_path, resample_rate, **params):
+def evaluate(DataSet, registration_nets, levels, transfer_model, main_file_path, device, data_path, resample_rate, **params):
     '''
     Wrapper for model evaluation
     
@@ -43,12 +43,12 @@ def evaluate(DataSet, registration_model, transfer_model, main_file_path, device
     grid: torch.Tensor
         grid of full images (coresponding to resampled dataset size)
     '''
-    grid, deformation_fields = inference_to_grid_df(DataSet, registration_model, transfer_model, device, **params)
+    grid, deformation_fields = inference_to_grid_df(DataSet, registration_nets, levels, transfer_model, device, **params)
     rTRE = inference_to_rtre(main_file_path, deformation_fields, data_path, resample_rate)
 
     return grid, np.mean(rTRE)
 
-def inference_to_grid_df(DataSet, registration_model, transfer_model, device, **params):
+def inference_to_grid_df(DataSet, registration_nets, levels, transfer_model, device, **params):
     '''
     Main test-time inference.
     Goes over the whole dataset image-by-image
@@ -68,7 +68,8 @@ def inference_to_grid_df(DataSet, registration_model, transfer_model, device, **
         pytorch device
     '''
     # inference
-    registration_model.eval()
+    for net in registration_nets:
+        net.eval()
     if transfer_model is not None: transfer_model.eval()
 
     testloader = DataSet.get_eval_loader(**params)
@@ -92,17 +93,24 @@ def inference_to_grid_df(DataSet, registration_model, transfer_model, device, **
                 content_image = TF.rgb_to_grayscale(content_image)
                 style_image = TF.rgb_to_grayscale(style_image)
 
+                content_pyramid = create_pyramid(content_image, len(registration_nets))
+                style_pyramid = create_pyramid(style_image, len(registration_nets))
+
                 # non rigid transform
                 #NOTE this can be streamlined by doing df_field after aggregating output
-                deformation_field = registration_model(style_image, content_image)                                     # permute(0, 3, 1, 2) to cheat torchio aggregator which has hard-coded data dimension
-                n_grid = df_field_v2(content_image, deformation_field, None, device).permute(0, 3, 1, 2).unsqueeze(-1) # -1 for z-dimension to cheat torchio aggregator
+                _, _, deformation_field = register(registration_nets, content_pyramid, style_pyramid, levels, device)                               # permute(0, 3, 1, 2) to cheat torchio aggregator which has hard-coded data dimension
+                deformation_field = deformation_field[-1]
+                _, n_grid = df_field_v2(content_image, deformation_field, None, device)
+                n_grid = n_grid.permute(0, 3, 1, 2).unsqueeze(-1) # -1 for z-dimension to cheat torchio aggregator
+
+            
                 n_grid = scale_patch(n_grid, locations[0]) # scaling to numpy displacement format for  aggregating to make sense
                 aggregator.add_batch(n_grid, locations)
 
             deformation_fields += [aggregator.get_output_tensor().squeeze(-1).permute(1, 2, 0).unsqueeze(0)] # getting aggregator output for a single image
 
         deformation_fields = [rescale_to_tc_df(df, df.shape[1:3]).float() for df in deformation_fields]
-        #NOTE there's gotta be a better way but i don't have time
+        #HACK: didn't have time to fix, sorry
         nr_samples = 3
         low = random.randint(1, len(deformation_fields)-nr_samples)
         high = low+nr_samples
@@ -115,9 +123,15 @@ def inference_to_grid_df(DataSet, registration_model, transfer_model, device, **
 
         outputs = [F.grid_sample(x, n_grid, mode='bilinear', padding_mode='zeros') for x, n_grid in zip(srcs, grids)]
 
-        grid = make_grid(outputs, nr_samples, srcs, trgs)
+        try:
+            grid = make_grid(outputs, nr_samples, srcs, trgs)
+        except RuntimeError:
+            print("Errored out in evaluation due to size mismatch. Skipping this grid in logging...")
+            grid = None
 
-    registration_model.train()
+    for net in registration_nets:
+        net.train()
+
     if transfer_model is not None: transfer_model.train()
 
     return grid, deformation_fields

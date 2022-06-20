@@ -3,33 +3,23 @@
 # from albumentations.pytorch import ToTensorV2
 import cv2
 import numpy as np
-from numpy.lib.utils import who
 from utils import Align_subject, resizeAndPad, resize_dataset
 from torchvision import transforms
 import torchio as tio
 import os
-from losses import Grad, NCC, diffusion, jcob_det_3, ncc_local, curvature_regularization, mind_loss
 
-
-run_identifier = 'whole'
+run_identifier = 'multiresolution-level_1_2'
 # run_identifier = 'hparams-testing'
-resize = 6 # for initial images downsampling
-# %% hparams
-hparams = {
-  "lambda_reg_list": [2000],
-  "learning_rate_list": [1e-4],
-  "decay_list": [0.995],
-  "batch_size_list": [8],
-  "reg_functions": [curvature_regularization],
-  "cost_functions": [ncc_local],
-  "vecint_list": [None],
-  "lambda_trans_list": [None],
-  "cielab": False,
-}
+resize = 6
 # %% General config
-config = {'epochs': 150,
+config = {'epochs': 1500,
           'sample_every': 1,
-          'checkpoint_every': 10,
+          'eval_every': 50,
+          # 'flow_every': 1,
+          # 'test_every': 100,
+        #   'lr_scheduler_every': 250,
+          # 'lmbd_grad_reg': 1000,
+          'checkpoint_every': 1,
           }
 
 # %% Data config
@@ -37,25 +27,24 @@ config = {'epochs': 150,
 data_config = {'train_root': f'resized_{resize}/',
                'test_root': f'resized_{resize}/',
                'main_file_path': 'raw/edited_data_v3.csv',
-               'summary_path': f'runs/hunt/{run_identifier}',
+               'summary_path': f'runs/multires/{run_identifier}',
                'resample_rate': resize,
-               'model_checkpoint': 'checkpoints/hunt/hunt-cost_ncc_local-vecint_None-reg_diffusion-lr_0.01-decay_0.97-bsize_8-lmd_reg_8000-lmd_trans_None_3.tar'}
+               'model_checkpoint': 'checkpoints/multires/multiresolution-patches_512-levels_2-freeze_[2]-cost_ncc_local-reg_diffusion-lr_0.0001-decay_0.99-bsize_4-lmd_reg_6000-lmd_trans_None.tar'}
 
 base_transforms = [
         # Align_subject(data_config['resample_rate']),
-        Align_subject(1, color_mode='bgr', whole_mode_size=(800, 800)),
+        Align_subject(1),
         tio.RescaleIntensity(out_min_max=(0, 1)),
         ]
 # %% Model config
-model_config = {'betas': [0.9, 0.999],
-                'resume': False,
-                'reset_optim': True,
-                'reset_epoch': True,
-                'checkpoint_path': f'checkpoints/hunt/{run_identifier}',
+model_config = {#'learning_rate': 1e-4,
+                # 'decay_rate': 0.995,
+                'betas': [0.9, 0.999],
+                'resume': True,
+                'reset_optim': False,
+                'reset_epoch': False,
+                'checkpoint_path': f'checkpoints/multires/{run_identifier}',
                 }
-
-lr_config = {'decay_kickin': 10,
-             'swa_kickin': 130}
 
 def init_data(root='raw/', resize=4, summary_path='raw/edited_data_v3.csv', save_root=''):
   '''

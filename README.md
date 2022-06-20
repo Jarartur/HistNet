@@ -15,6 +15,8 @@ Then run `AffineClicker/affine_trans.py` to generate a summary table of the data
 
 For trainig the deep learning model make your configuration in `HistNet/config.py` and run `HistNet/train.py`
 
+For HPC (SLURM) we provide `run_hpc.slurm` file that lets you configure and easily run training with live tensorboard tunneling through ssh.
+
 # Dataset
 
 Dataset provided by the ANHIR Grand Challenge organizers and is available [here](https://anhir.grand-challenge.org/Data/)

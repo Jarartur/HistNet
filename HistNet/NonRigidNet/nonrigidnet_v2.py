@@ -28,12 +28,13 @@ class RegistrationNetwork(nn.Module):
     """
     Simple U-Net-like architecture.
     """
-    def __init__(self, input_channels=1, ouput_channels=2):
+    def __init__(self, input_channels=1, ouput_channels=2, transfer_net=False):
         super(RegistrationNetwork, self).__init__()
         self.input_channels = input_channels
+        self.transfer_net = transfer_net
         
         self.encoder_1 = nn.Sequential(
-            nn.Conv2d(input_channels*2, 16, 4, stride=2, padding=1),
+            nn.Conv2d(input_channels, 16, 4, stride=2, padding=1),
             nn.GroupNorm(16, 16),
             nn.LeakyReLU(0.01, inplace=True),   
         )
@@ -111,8 +112,8 @@ class RegistrationNetwork(nn.Module):
         d1 = self.decoder_1(tc.cat((d2, x1), dim=1))
         d1 = self.pad(d1, i1)
         r1 = self.output_1(d1)
-        if self.input_channels == 1: out = r1.permute(0, 2, 3, 1)
-        elif self.input_channels == 3: out = r1
+        if not self.transfer_net: out = r1.permute(0, 2, 3, 1)
+        else: out = r1
         return out
 
 def load_network(weights_path=None):
@@ -127,21 +128,22 @@ def load_network(weights_path=None):
 
 def test_forward_pass():
     # device = "cuda:0"
-    device = "cpu"
-    model = load_network().to(device)
-    y_size, x_size = 800, 800
-    no_channels = 2
+    device = "cuda"
+    model = RegistrationNetwork().to(device)
+    y_size, x_size = 128, 128
+    no_channels = 1
     batch_size = 1
     example_input = tc.rand((batch_size, no_channels, y_size, x_size)).to(device)
+    example_input_2 = tc.rand((batch_size, no_channels, y_size, x_size)).to(device)
     # pyramid = utils.create_pyramid(example_input, 3, device=device)
-    i1 = example_input
-    print("Level 1 size: ", i1.size())
-    r1 = model(i1)
-    print("Result level 1 size: ", r1.size())
-    ts.summary(model, [(2, i1.size(2), i1.size(3))], device=device)
+    print(f'input shape: {example_input.shape}')
+    r1 = model(example_input, example_input_2)
+    ts.summary(model, [(no_channels, y_size, x_size), (no_channels, y_size, x_size)], device=device)
     print(f'output shape: {r1.shape}')
+
 def run():
     test_forward_pass()
+
 if __name__ == "__main__":
     import torchsummary as ts
     run()
